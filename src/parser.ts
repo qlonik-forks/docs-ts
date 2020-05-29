@@ -248,10 +248,11 @@ function getDescription(annotation: doctrine.Annotation): O.Option<string> {
   )
 }
 
-function getSince(annotation: doctrine.Annotation): O.Option<string> {
+function getSince(annotation: doctrine.Annotation): string {
   return pipe(
     O.fromNullable(annotation.tags.filter(tag => tag.title === 'since')[0]),
-    O.mapNullable(tag => tag.description)
+    O.mapNullable(tag => tag.description),
+    O.getOrElse(() => 'DEV')
   )
 }
 
@@ -278,7 +279,7 @@ function getAnnotationInfo(
   annotation: doctrine.Annotation
 ): {
   description: O.Option<string>
-  since: O.Option<string>
+  since: string
   deprecated: boolean
   examples: Array<Example>
 } {
@@ -290,23 +291,11 @@ function getAnnotationInfo(
   }
 }
 
-function ensureSinceTag<A>(name: string, since: O.Option<string>, f: (since: string) => A): Parser<A> {
-  return pipe(
-    since,
-    O.fold(
-      () => E.left([`missing @since tag in ${name} documentation`]),
-      since => E.right(f(since))
-    )
-  )
-}
-
 function parseInterfaceDeclaration(id: ast.InterfaceDeclaration): Parser<Interface> {
   const annotation = getAnnotation(id.getJsDocs())
   const { description, since, deprecated, examples } = getAnnotationInfo(annotation)
   const signature = id.getText()
-  return ensureSinceTag(id.getName(), since, since =>
-    interface_(documentable(id.getName(), description, since, deprecated, examples), signature)
-  )
+  return E.right(interface_(documentable(id.getName(), description, since, deprecated, examples), signature))
 }
 
 const byName = pipe(
@@ -355,9 +344,7 @@ function parseFunctionDeclaration(moduleName: string, fd: ast.FunctionDeclaratio
   if (name === undefined || name.trim() === '') {
     return E.left([`Missing function name in module ${moduleName}`])
   } else {
-    return ensureSinceTag(name, since, since =>
-      func(documentable(name, description, since, deprecated, examples), signatures)
-    )
+    return E.right(func(documentable(name, description, since, deprecated, examples), signatures))
   }
 }
 
@@ -367,9 +354,7 @@ function parseFunctionVariableDeclaration(vd: ast.VariableDeclaration): Parser<F
   const { description, since, deprecated, examples } = getAnnotationInfo(annotation)
   const name = vd.getName()
   const signature = `export declare const ${name}: ${stripImportTypes(vd.getType().getText(vd))}`
-  return ensureSinceTag(name, since, since =>
-    func(documentable(name, description, since, deprecated, examples), [signature])
-  )
+  return E.right(func(documentable(name, description, since, deprecated, examples), [signature]))
 }
 
 /**
@@ -415,9 +400,7 @@ function parseTypeAliasDeclaration(ta: ast.TypeAliasDeclaration): Parser<TypeAli
   const { description, since, deprecated, examples } = getAnnotationInfo(annotation)
   const signature = ta.getText()
   const name = ta.getName()
-  return ensureSinceTag(name, since, since =>
-    typeAlias(documentable(name, description, since, deprecated, examples), signature)
-  )
+  return E.right(typeAlias(documentable(name, description, since, deprecated, examples), signature))
 }
 
 /**
@@ -448,9 +431,7 @@ function parseConstantVariableDeclaration(vd: ast.VariableDeclaration): Parser<C
   const type = stripImportTypes(vd.getType().getText(vd))
   const name = vd.getName()
   const signature = `export declare const ${name}: ${type}`
-  return ensureSinceTag(name, since, since =>
-    constant(documentable(name, description, since, deprecated, examples), signature)
-  )
+  return E.right(constant(documentable(name, description, since, deprecated, examples), signature))
 }
 
 const isVariableDeclarationList = (
@@ -496,9 +477,7 @@ function parseExportSpecifier(es: ast.ExportSpecifier): Parser<Export> {
       const text = commentRange.getText()
       const annotation = doctrine.parse(text, { unwrap: true })
       const { description, since, deprecated, examples } = getAnnotationInfo(annotation)
-      return ensureSinceTag(name, since, since =>
-        export_(documentable(name, description, since, deprecated, examples), signature)
-      )
+      return E.right(export_(documentable(name, description, since, deprecated, examples), signature))
     })
   )
 }
@@ -563,9 +542,7 @@ function parseMethod(md: ast.MethodDeclaration): Parser<Method> {
           ...overloads.slice(0, overloads.length - 1).map(md => md.getText()),
           getMethodSignature(overloads[overloads.length - 1])
         ]
-  return ensureSinceTag(name, since, since =>
-    method(documentable(name, description, since, deprecated, examples), signatures)
-  )
+  return E.right(method(documentable(name, description, since, deprecated, examples), signatures))
 }
 
 function parseProperty(pd: ast.PropertyDeclaration): Parser<Property> {
@@ -575,9 +552,7 @@ function parseProperty(pd: ast.PropertyDeclaration): Parser<Property> {
   const type = stripImportTypes(pd.getType().getText(pd))
   const readonly = pd.getFirstModifierByKind(ast.ts.SyntaxKind.ReadonlyKeyword) === undefined ? '' : 'readonly '
   const signature = `${readonly}${name}: ${type}`
-  return ensureSinceTag(name, since, since =>
-    property(documentable(name, description, since, deprecated, examples), signature)
-  )
+  return E.right(property(documentable(name, description, since, deprecated, examples), signature))
 }
 
 function parseClass(moduleName: string, c: ast.ClassDeclaration): Parser<Class> {
@@ -588,9 +563,6 @@ function parseClass(moduleName: string, c: ast.ClassDeclaration): Parser<Class> 
     const annotation = getAnnotation(c.getJsDocs())
     const { description, since, deprecated, examples } = getAnnotationInfo(annotation)
     const signature = getClassDeclarationSignature(c)
-    if (O.isNone(since)) {
-      return E.left([`missing @since tag in ${name} documentation`])
-    }
     return pipe(
       sequenceS(E.either)({
         methods: traverse(c.getInstanceMethods(), parseMethod),
@@ -605,7 +577,7 @@ function parseClass(moduleName: string, c: ast.ClassDeclaration): Parser<Class> 
       }),
       E.map(({ methods, staticMethods, properties }) =>
         class_(
-          documentable(name, description, since.value, deprecated, examples),
+          documentable(name, description, since, deprecated, examples),
           signature,
           methods,
           staticMethods,
@@ -639,7 +611,7 @@ export function getModuleDocumentation(sourceFile: ast.SourceFile, name: string)
       const text = comments[0].getText()
       const annotation = doctrine.parse(text, { unwrap: true })
       const { description, since, deprecated, examples } = getAnnotationInfo(annotation)
-      return ensureSinceTag(name, since, since => documentable(name, description, since, deprecated, examples))
+      return E.right(documentable(name, description, since, deprecated, examples))
     }
   }
   return E.left([`missing documentation in ${name} module`])
